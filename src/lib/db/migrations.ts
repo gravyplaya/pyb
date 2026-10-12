@@ -73,11 +73,39 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS chat_messages_session_idx ON chat_messages (session_id, id);
 `;
 
+/**
+ * Migration 003 — bill embeddings (Phase 4).
+ *
+ * bill_embeddings  one row per bill: a 768-dim vector over the bill's
+ *                  summary (fallback: title), for semantic search. The
+ *                  embedding model is recorded per row so the search path
+ *                  compares vectors from the same space. The content hash
+ *                  makes stale rows cheap to find: the poller's embedder
+ *                  re-embeds any bill whose summary/title changed.
+ */
+const migration003 = `
+CREATE TABLE IF NOT EXISTS bill_embeddings (
+  congress     int         NOT NULL,
+  bill_type    text        NOT NULL,
+  number       text        NOT NULL,
+  model        text        NOT NULL,
+  source       text        NOT NULL DEFAULT 'title',
+  content_hash text        NOT NULL,
+  embedding    vector(768) NOT NULL,
+  embedded_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (congress, bill_type, number)
+);
+
+CREATE INDEX IF NOT EXISTS bill_embeddings_vec_idx
+  ON bill_embeddings USING hnsw (embedding vector_cosine_ops);
+`;
+
 export type Migration = { id: number; name: string; sql: string };
 
 export const migrations: Migration[] = [
   { id: 1, name: "initial_schema", sql: migration001 },
   { id: 2, name: "chat_sessions", sql: migration002 },
+  { id: 3, name: "bill_embeddings", sql: migration003 },
 ];
 
 /** Applies all pending migrations idempotently, one transaction each. */

@@ -6,6 +6,7 @@
 
 import { query } from "@/lib/db";
 import { congress as congressApi } from "@/lib/congress/client";
+import { embedText } from "@/lib/agent/embeddings";
 
 export interface BillRow {
   congress: number;
@@ -148,4 +149,118 @@ export async function trendingBills(limit = 10) {
     [limit],
   );
   return rows.rows.map(mapRow);
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid search (Phase 4): semantic over the pgvector embeddings, blended
+// with keyword search, so topical questions find relevant bills even when
+// no keyword matches a title — and the answers cite real bill numbers.
+// ---------------------------------------------------------------------------
+
+export interface HybridBill extends BillRow {
+  similarity: number | null;
+  source: string | null;
+}
+
+const SEMANTIC_POOL = 24; // candidates from the vector leg before blending
+const KEYWORD_POOL = 15; // candidates from the keyword leg before blending
+const RRF_K = 60;
+// An explicit bill-number reference in the query ("H.R. 1") pins that bill.
+const BILL_REF_SCORE = 10;
+
+function parseBillRefs(q: string): { type: string; number: string }[] {
+  const refs: { type: string; number: string }[] = [];
+  for (const m of q.matchAll(/\b(H\.?R\.?|S\.?)\s*(\d+)\b/gi)) {
+    refs.push({ type: m[1].toUpperCase().startsWith("H") ? "hr" : "s", number: m[2] });
+  }
+  return refs;
+}
+
+/**
+ * Semantic search over the bill embeddings. The query is embedded with the
+ * model that dominates the vector store, so query and stored vectors live
+ * in the same space even after a fallback embed.
+ */
+async function semanticSearch(
+  q: string,
+  limit: number,
+): Promise<HybridBill[]> {
+  const dom = await query<{ model: string }>(
+    `SELECT model FROM bill_embeddings GROUP BY model ORDER BY count(*) DESC LIMIT 1`,
+  );
+  const preferred = dom.rows[0]?.model;
+  const { vector } = await embedText(q, { preferModel: preferred });
+  const rows = await query<Record<string, unknown>>(
+    `SELECT b.congress, b.bill_type, b.number, b.title, b.origin_chamber,
+            b.introduced_date, b.latest_action_date, b.latest_action_text, b.update_date,
+            e.source, 1 - (e.embedding <=> $2::vector) AS similarity
+     FROM bill_embeddings e
+     JOIN bills b USING (congress, bill_type, number)
+     WHERE e.model = $1
+     ORDER BY e.embedding <=> $2::vector
+     LIMIT $3`,
+    [preferred ?? "", `[${vector.join(",")}]`, limit],
+  );
+  return rows.rows.map((r) => ({
+    ...mapRow(r),
+    similarity: r.similarity == null ? null : Number(r.similarity),
+    source: r.source == null ? null : String(r.source),
+  }));
+}
+
+/**
+ * Hybrid search: semantic + keyword legs blended with reciprocal-rank
+ * fusion, explicit bill-number references pinned to the top. Falls back to
+ * keyword-only when the vector store is empty or the embedding API is down.
+ */
+export async function hybridSearchBills(q: string, limit = 8): Promise<HybridBill[]> {
+  const refs = parseBillRefs(q);
+  const keyword = await searchBills(q, KEYWORD_POOL).catch(() => [] as BillRow[]);
+
+  let semantic: HybridBill[] = [];
+  try {
+    semantic = await semanticSearch(q, SEMANTIC_POOL);
+  } catch (e) {
+    console.error("[pyb] semantic search failed (falling back to keyword):", e);
+  }
+
+  if (semantic.length === 0) {
+    return keyword.slice(0, limit).map((r) => ({ ...r, similarity: null, source: null }));
+  }
+
+  // Reciprocal-rank fusion across the two legs.
+  const scores = new Map<string, { row: HybridBill; score: number }>();
+  const addLeg = (rows: (BillRow | HybridBill)[], sims?: (number | null)[]) => {
+    rows.forEach((row, i) => {
+      const key = `${row.congress}-${row.bill_type}-${row.number}`;
+      const score = 1 / (RRF_K + i + 1);
+      const existing = scores.get(key);
+      const sim = sims?.[i] ?? existing?.row.similarity ?? null;
+      if (existing) {
+        existing.score += score;
+        if (sim != null && existing.row.similarity == null) existing.row.similarity = sim;
+      } else {
+        scores.set(key, {
+          row: { ...row, similarity: sim, source: (row as HybridBill).source ?? null },
+          score,
+        });
+      }
+    });
+  };
+  addLeg(semantic, semantic.map((r) => r.similarity));
+  addLeg(keyword);
+
+  const pinned = new Set(refs.map((r) => `${r.type}-${r.number}`));
+  const blended = [...scores.values()].map((e) => {
+    const t = e.row.bill_type.toLowerCase() === "hr" ? "hr" : e.row.bill_type.toLowerCase();
+    const isRef = pinned.has(`${t}-${e.row.number}`);
+    return { ...e.row, _score: e.score + (isRef ? BILL_REF_SCORE : 0) };
+  });
+  blended.sort((a, b) => b._score - a._score);
+  return blended
+    .slice(0, limit)
+    .map(({ _score, ...row }) => {
+      void _score;
+      return row;
+    });
 }

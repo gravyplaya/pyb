@@ -26,6 +26,10 @@ export async function register(): Promise<void> {
   if (process.env.PYB_SYNC === "1") {
     const { startSync } = await import("@/lib/congress/poller");
     startSync();
+    // Same gate as the poller: the embedder only talks to Postgres and
+    // OpenRouter, but keeps dev quiet unless opted in.
+    const { startEmbedder } = await import("@/lib/agent/embedder");
+    startEmbedder();
   } else {
     console.log("[pyb-sync] poller disabled (set PYB_SYNC=1 to enable)");
   }

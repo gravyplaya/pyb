@@ -4,7 +4,7 @@
  * detail/summary fetch in bills.ts, so answers come from real data.
  */
 
-import { billDetail, billsSince, recentActions, searchBills, type BillRow } from "@/lib/bills";
+import { billDetail, billsSince, hybridSearchBills, recentActions, type BillRow } from "@/lib/bills";
 import { congress as congressApi } from "@/lib/congress/client";
 import type { ToolDef } from "./openrouter";
 
@@ -40,8 +40,16 @@ function clampInt(value: unknown, min: number, max: number, dflt: number): numbe
 export async function toolSearchBills(args: { query?: string; limit?: number }): Promise<string> {
   const q = (args.query ?? "").trim();
   if (!q) return JSON.stringify({ error: "query is required" });
-  const rows = await searchBills(q, clampInt(args.limit, 1, 20, 8));
-  return JSON.stringify({ count: rows.length, bills: rows.map(compactBill) });
+  // Hybrid search: semantic over the pgvector embeddings blended with the
+  // keyword index; falls back to keyword-only when the vector store is
+  // empty or the embedding API is down.
+  const rows = await hybridSearchBills(q, clampInt(args.limit, 1, 20, 8));
+  const results = rows.map((r) => ({
+    ...compactBill(r),
+    similarity: r.similarity == null ? null : Number(r.similarity.toFixed(3)),
+    from: r.source ?? "keyword",
+  }));
+  return JSON.stringify({ count: results.length, bills: results });
 }
 
 export async function toolBillDetail(args: {
@@ -183,7 +191,7 @@ export const AGENT_TOOLS: ToolDef[] = [
     function: {
       name: "search_bills",
       description:
-        "Search the bill index by keyword in the bill title. Use for topical questions like 'bills about climate' or 'education bills'.",
+        "Hybrid search over the bill index — semantic meaning plus title keywords, so topical questions find relevant bills even when no word matches a title. Use for 'bills about housing affordability', 'climate bills', 'what's in the bills on veterans'. Returns bill numbers, titles, latest actions, and a similarity score per bill.",
       parameters: {
         type: "object",
         properties: {
