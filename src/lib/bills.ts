@@ -46,7 +46,7 @@ function mapRow(r: Record<string, unknown>): BillRow {
     number: String(r.number),
     title: String(r.title),
     origin_chamber: String(r.origin_chamber),
-    introduced_date: String(r.introduced_date).slice(0, 10),
+    introduced_date: pgToIso(r.introduced_date as string | Date)?.slice(0, 10) ?? "",
     latest_action_date: pgToIso(r.latest_action_date as string | null)?.slice(0, 10) ?? null,
     latest_action_text: r.latest_action_text == null ? null : String(r.latest_action_text),
     update_date: pgToIso(r.update_date as Date | string) ?? "",

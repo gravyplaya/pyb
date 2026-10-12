@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PuckYoBills — What Congress is actually doing",
+  title: "Puck Yo Bills — Understanding Congressional Bills Made Easy",
   description:
-    "Follow new bills and activity in the U.S. House and Senate, synced from Congress.gov, and ask an AI agent what any of it means.",
+    "Your guide to understanding congressional bills and legislation. Ask questions about any bill in Congress and get clear, straightforward answers.",
 };
 
 export default function RootLayout({

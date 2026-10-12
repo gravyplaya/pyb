@@ -9,6 +9,8 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@neon/config": "^1.8.6",
+    "@neon/env": "^1.5.3",
     "next": "15.2.4",
     "pg": "^8.23.0",
     "react": "^19.0.0",
