@@ -39,6 +39,37 @@ export async function billsSince(since?: string, limit = 50, offset = 0): Promis
   return rows.rows.map(mapRow);
 }
 
+/** Title keyword search for the chat agent's search_bills tool. */
+export async function searchBills(q: string, limit = 8): Promise<BillRow[]> {
+  const rows = await query<Record<string, unknown>>(
+    `${BASE_SELECT} WHERE title ILIKE $1 ORDER BY update_date DESC LIMIT $2`,
+    [`%${q}%`, limit],
+  );
+  return rows.rows.map(mapRow);
+}
+
+/**
+ * Bills whose latest action falls inside the look-back window, newest action
+ * first — the chat agent's "what happened in the Senate today" tool.
+ */
+export async function recentActions(
+  opts: { chamber?: string | null; days?: number; limit?: number } = {},
+): Promise<BillRow[]> {
+  const { chamber = null, days = 3, limit = 12 } = opts;
+  const clauses = [`latest_action_date >= now()::date - $1::int`];
+  const vals: unknown[] = [days];
+  if (chamber) {
+    vals.push(chamber);
+    clauses.push(`origin_chamber = $${vals.length}`);
+  }
+  vals.push(limit);
+  const rows = await query<Record<string, unknown>>(
+    `${BASE_SELECT} WHERE ${clauses.join(" AND ")} ORDER BY latest_action_date DESC, update_date DESC LIMIT $${vals.length}`,
+    vals,
+  );
+  return rows.rows.map(mapRow);
+}
+
 function mapRow(r: Record<string, unknown>): BillRow {
   return {
     congress: Number(r.congress),

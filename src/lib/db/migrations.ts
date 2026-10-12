@@ -45,10 +45,39 @@ CREATE TABLE IF NOT EXISTS sync_state (
 INSERT INTO sync_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 `;
 
+/**
+ * Migration 002 — chat session persistence (Phase 3).
+ *
+ * chat_sessions  one row per browser chat; the client keeps the UUID in
+ *                localStorage so a conversation survives reloads.
+ * chat_messages  user/assistant turns only — tool-call traffic stays
+ *                in-process and is not persisted.
+ */
+const migration002 = `
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  last_active_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  session_id uuid        NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  role       text        NOT NULL CHECK (role IN ('user','assistant')),
+  content    text        NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS chat_messages_session_idx ON chat_messages (session_id, id);
+`;
+
 export type Migration = { id: number; name: string; sql: string };
 
 export const migrations: Migration[] = [
   { id: 1, name: "initial_schema", sql: migration001 },
+  { id: 2, name: "chat_sessions", sql: migration002 },
 ];
 
 /** Applies all pending migrations idempotently. */
