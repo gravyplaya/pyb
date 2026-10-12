@@ -58,7 +58,10 @@ export default function ChatBox() {
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || busy) return;
+    // `restored` gates the send so a returning visitor can't fire a turn
+    // while the history replay is still in flight — that would get clobbered
+    // by the restore's setMessages below.
+    if (!text || busy || !restored) return;
     setInput("");
     setMessages((m) => [...m, { role: "user", text }, { role: "assistant", text: "" }]);
     setBusy(true);
@@ -159,7 +162,7 @@ export default function ChatBox() {
         />
         <button
           type="submit"
-          disabled={busy || !input.trim()}
+          disabled={busy || !restored || !input.trim()}
           className="rounded-md bg-amber-400 px-5 py-2 text-sm font-bold text-slate-900 hover:bg-amber-300 disabled:opacity-40"
         >
           {busy ? "…" : "Send"}

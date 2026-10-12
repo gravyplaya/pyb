@@ -31,10 +31,16 @@ function compactBill(r: BillRow) {
 // Tool implementations
 // ---------------------------------------------------------------------------
 
+/** Clamp a model-supplied "limit" argument into [min, max], else default. */
+function clampInt(value: unknown, min: number, max: number, dflt: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= min ? Math.min(Math.floor(n), max) : dflt;
+}
+
 export async function toolSearchBills(args: { query?: string; limit?: number }): Promise<string> {
   const q = (args.query ?? "").trim();
   if (!q) return JSON.stringify({ error: "query is required" });
-  const rows = await searchBills(q, Math.min(args.limit ?? 8, 20));
+  const rows = await searchBills(q, clampInt(args.limit, 1, 20, 8));
   return JSON.stringify({ count: rows.length, bills: rows.map(compactBill) });
 }
 
@@ -148,8 +154,8 @@ export async function toolLatestActions(args: {
     chamberRaw === "house" || chamberRaw === "senate"
       ? chamberRaw.charAt(0).toUpperCase() + chamberRaw.slice(1)
       : null;
-  const days = Math.min(Math.max(args.days ?? 3, 1), 30);
-  const limit = Math.min(args.limit ?? 12, 25);
+  const days = clampInt(args.days, 1, 30, 3);
+  const limit = clampInt(args.limit, 1, 25, 12);
 
   let rows = await recentActions({ chamber, days, limit });
   // Quiet stretch (weekends/recess): fall back to most recent actions overall.

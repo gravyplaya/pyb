@@ -45,13 +45,14 @@ export function historyToMessages(history: { role: string; content: string }[]):
 
 /**
  * Run one agent turn. Yields streamed text deltas; resolves when the final
- * answer is fully streamed. `onModel` is called once the answering model is
- * known (used for diagnostics).
+ * answer is fully streamed. `opts.signal` aborts the model call mid-turn
+ * (used when the client disconnects); `opts.onModel` is called once the
+ * answering model is known (used for diagnostics).
  */
 export async function* runAgentTurn(
   history: ChatMessage[],
   userMessage: string,
-  onModel?: (model: string) => void,
+  opts: { signal?: AbortSignal; onModel?: (model: string) => void } = {},
 ): AsyncGenerator<string> {
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt() },
@@ -69,6 +70,7 @@ export async function* runAgentTurn(
       tools: AGENT_TOOLS,
       temperature: 0.3,
       maxTokens: 1200,
+      signal: opts.signal,
     })) {
       if (ev.type === "text") {
         text += ev.text;
@@ -81,9 +83,13 @@ export async function* runAgentTurn(
     }
     if (!done) break; // defensive: generator ended without a done event
 
-    if (model && onModel) onModel(model);
+    if (model && opts.onModel) opts.onModel(model);
 
     if (toolCalls.length === 0) return; // final answer fully streamed
+
+    // Last round: don't execute tool calls no model will ever see —
+    // fall through to the honest "out of tool rounds" note instead.
+    if (step === MAX_STEPS - 1) break;
 
     // Tool round: record the assistant's tool_calls, execute, feed back.
     messages.push({ role: "assistant", content: text || null, tool_calls: toolCalls });

@@ -41,9 +41,11 @@ export async function billsSince(since?: string, limit = 50, offset = 0): Promis
 
 /** Title keyword search for the chat agent's search_bills tool. */
 export async function searchBills(q: string, limit = 8): Promise<BillRow[]> {
+  // Escape ILIKE wildcards so model/user input matches literally.
+  const escaped = q.replace(/[\\%_]/g, (c) => `\\${c}`);
   const rows = await query<Record<string, unknown>>(
     `${BASE_SELECT} WHERE title ILIKE $1 ORDER BY update_date DESC LIMIT $2`,
-    [`%${q}%`, limit],
+    [`%${escaped}%`, limit],
   );
   return rows.rows.map(mapRow);
 }

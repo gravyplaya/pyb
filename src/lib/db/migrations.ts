@@ -80,9 +80,9 @@ export const migrations: Migration[] = [
   { id: 2, name: "chat_sessions", sql: migration002 },
 ];
 
-/** Applies all pending migrations idempotently. */
+/** Applies all pending migrations idempotently, one transaction each. */
 export async function runMigrations(): Promise<string[]> {
-  const { query } = await import("./index");
+  const { query, tx } = await import("./index");
   await query(`CREATE TABLE IF NOT EXISTS schema_migrations (
     id int PRIMARY KEY, name text NOT NULL, applied_at timestamptz DEFAULT now()
   )`);
@@ -92,8 +92,15 @@ export async function runMigrations(): Promise<string[]> {
   const ran: string[] = [];
   for (const m of migrations) {
     if (applied.has(m.id)) continue;
-    await query(m.sql);
-    await query("INSERT INTO schema_migrations (id, name) VALUES ($1, $2)", [m.id, m.name]);
+    // Migration SQL + its bookkeeping row commit atomically: a crash between
+    // the two must not re-run a half-applied migration on the next boot.
+    await tx(async (client) => {
+      await client.query(m.sql);
+      await client.query("INSERT INTO schema_migrations (id, name) VALUES ($1, $2)", [
+        m.id,
+        m.name,
+      ]);
+    });
     ran.push(m.name);
   }
   return ran;

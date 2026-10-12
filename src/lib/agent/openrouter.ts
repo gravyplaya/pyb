@@ -17,12 +17,25 @@
 
 const BASE = "https://openrouter.ai/api/v1";
 
-export const FREE_MODELS = [
-  "google/gemma-4-31b-it:free", // best chat quality, tool capable; upstream pool 429s at peak
-  "apodex/apodex-1.1-mini:free", // verified: emits tool calls
-  "cohere/north-mini-code:free", // verified: emits tool calls
-  "dots-studio/dots-3-note-preview:free", // last resort: chats well, tools unreliable
-] as const;
+/**
+ * The fallback chain. Override per environment with OPENROUTER_MODELS
+ * (comma-separated OpenRouter model ids) to rotate the chain when the
+ * free-tier catalog shifts — no code change needed. Unset or empty falls
+ * back to the default chain below.
+ */
+export const FREE_MODELS: string[] = (() => {
+  const fromEnv = (process.env.OPENROUTER_MODELS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (fromEnv.length) return fromEnv;
+  return [
+    "google/gemma-4-31b-it:free", // best chat quality, tool capable; upstream pool 429s at peak
+    "apodex/apodex-1.1-mini:free", // verified: emits tool calls
+    "cohere/north-mini-code:free", // verified: emits tool calls
+    "dots-studio/dots-3-note-preview:free", // last resort: chats well, tools unreliable
+  ];
+})();
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -61,6 +74,21 @@ export class OpenRouterError extends Error {}
 function isRetryable(status: number): boolean {
   // 429 = free-tier rate limit; 404 = model not in catalog; 5xx = upstream.
   return status === 429 || status === 404 || status >= 500;
+}
+
+/** Combines signals (caller abort + timeout) into one, without AbortSignal.any. */
+function anySignal(...signals: (AbortSignal | undefined)[]): AbortSignal {
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  for (const s of signals) {
+    if (!s) continue;
+    if (s.aborted) {
+      ctrl.abort();
+      break;
+    }
+    s.addEventListener("abort", onAbort, { once: true });
+  }
+  return ctrl.signal;
 }
 
 function key(): string {
@@ -111,7 +139,10 @@ async function withFallback<T>(
   );
 }
 
-/** Non-streaming completion, optionally with tools. */
+/**
+ * Non-streaming completion, optionally with tools. Probe/diagnostic
+ * utility — the app itself streams via streamChatComplete below.
+ */
 export async function chatComplete(
   messages: ChatMessage[],
   opts: {
@@ -186,7 +217,7 @@ async function* sseDeltas(res: Response): AsyncGenerator<NonNullable<ORChoice["d
  */
 export async function* streamChatComplete(
   messages: ChatMessage[],
-  opts: { temperature?: number; maxTokens?: number; tools?: ToolDef[] } = {},
+  opts: { temperature?: number; maxTokens?: number; tools?: ToolDef[]; signal?: AbortSignal } = {},
 ): AsyncGenerator<
   { type: "text"; text: string } | { type: "done"; model: string; toolCalls: ToolCall[] }
 > {
@@ -206,9 +237,10 @@ export async function* streamChatComplete(
           max_tokens: opts.maxTokens ?? 1024,
           ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
         }),
-        signal: AbortSignal.timeout(120_000),
+        signal: anySignal(opts.signal, AbortSignal.timeout(120_000)),
       });
     } catch (e) {
+      if (opts.signal?.aborted) throw e; // caller went away — don't roll the chain
       streamErr = e;
       continue; // network/timeout: try next model
     }

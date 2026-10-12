@@ -16,6 +16,36 @@ export const maxDuration = 300;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Per-IP sliding window: POST /api/chat is public and drives OpenRouter +
+// Congress.gov + Postgres, so one client can't monopolize the free-model key.
+// In-memory per server instance — good enough for the single-container deploy.
+const RATE_LIMIT = 10; // messages…
+const RATE_WINDOW_MS = 60_000; // …per rolling minute per IP
+const rateHits = new Map<string, number[]>();
+
+function clientIp(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
+function allowRequest(ip: string): boolean {
+  const now = Date.now();
+  if (rateHits.size > 5_000) {
+    for (const [k, v] of rateHits) {
+      if (v.every((t) => now - t >= RATE_WINDOW_MS)) rateHits.delete(k);
+    }
+  }
+  const recent = (rateHits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT) {
+    rateHits.set(ip, recent);
+    return false;
+  }
+  recent.push(now);
+  rateHits.set(ip, recent);
+  return true;
+}
+
 /** GET /api/chat?sessionId=… — restore a conversation after a reload. */
 export async function GET(req: Request) {
   const sessionId = new URL(req.url).searchParams.get("sessionId") ?? "";
@@ -55,6 +85,13 @@ async function ensureSession(sessionId: string | null): Promise<string> {
 }
 
 export async function POST(req: Request) {
+  if (!allowRequest(clientIp(req))) {
+    return NextResponse.json(
+      { error: "Too many messages — take a breath and try again in a minute." },
+      { status: 429 },
+    );
+  }
+
   let message = "";
   let sessionId: string | null = null;
   try {
@@ -98,19 +135,52 @@ export async function POST(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let reply = "";
+      let clientGone = false;
+      // Aborting the agent when the client disconnects stops burning
+      // OpenRouter/Congress.gov quota for nobody; whatever streamed so far
+      // still persists below.
+      const abortAgent = new AbortController();
+      const push = (text: string) => {
+        if (clientGone) return;
+        try {
+          controller.enqueue(encoder.encode(text));
+        } catch {
+          clientGone = true;
+          abortAgent.abort();
+        }
+      };
+      req.signal.addEventListener(
+        "abort",
+        () => {
+          clientGone = true;
+          abortAgent.abort();
+        },
+        { once: true },
+      );
+
       try {
-        for await (const delta of runAgentTurn(historyToMessages(history), message)) {
+        for await (const delta of runAgentTurn(historyToMessages(history), message, {
+          signal: abortAgent.signal,
+        })) {
           reply += delta;
-          controller.enqueue(encoder.encode(delta));
+          push(delta);
         }
       } catch (e) {
-        console.error("[pyb] agent turn failed:", e);
-        const note =
-          "\n\n(Sorry — the assistant couldn't finish that answer. Please try again.)";
-        reply += note;
-        controller.enqueue(encoder.encode(note));
+        if (!abortAgent.signal.aborted) {
+          console.error("[pyb] agent turn failed:", e);
+          const note =
+            "\n\n(Sorry — the assistant couldn't finish that answer. Please try again.)";
+          reply += note;
+          push(note);
+        }
       } finally {
-        controller.close();
+        // The client may be gone (canceled stream): close() throws then,
+        // and that must never skip the persist below.
+        try {
+          controller.close();
+        } catch {
+          // already closed/canceled — nothing to do
+        }
         if (reply.trim()) {
           try {
             await query(

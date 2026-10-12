@@ -19,6 +19,10 @@ export async function register(): Promise<void> {
     console.error("[pyb] migrations failed:", e);
   }
 
+  // Prune stale chat sessions on a timer (30-day retention).
+  const { startChatCleanup } = await import("@/lib/chat/cleanup");
+  startChatCleanup();
+
   if (process.env.PYB_SYNC === "1") {
     const { startSync } = await import("@/lib/congress/poller");
     startSync();
